@@ -4,7 +4,7 @@
   "description": "",
   "main": "src/server.js",
   "scripts": {
-    "test": "node --test tests/health.test.js tests/schema.test.js tests/auth.test.js tests/auth.http.test.js",
+    "test": "node --test tests/health.test.js tests/schema.test.js tests/auth.test.js tests/auth.http.test.js tests/shutdown.test.js",
     "test:integration": "node --env-file=.env --test tests/integration/models.test.js",
     "test:integration:auth": "node --env-file=.env --test tests/integration/auth.test.js",
     "dev": "node --watch src/server.js",

@@ -15,13 +15,8 @@ async function closeDatabase() {
   try {
     await disconnectDb();
   } catch {
-    // console.error("Failed to close the MongoDB connection.");
-    // process.exitCode = 1;
-      console.error("MongoDB connection failed");
-      console.error("Error name:", error.name);
-      console.error("Error code:", error.code ?? "N/A");
-
-      process.exitCode = 1;
+    console.error("Failed to close the MongoDB connection.");
+    process.exitCode = 1;
   }
 }
 

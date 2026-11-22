@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import dotenv from "dotenv";
-import app from "./app.js";
+import { createApp } from "./app.js";
+import { loadAuthConfig } from "./config/auth.js";
 import { connectDb, disconnectDb } from "./config/db.js";
 
 dotenv.config({ quiet: true });
@@ -50,14 +51,17 @@ if (!uri?.match(/^mongodb(?:\+srv)?:\/\/\S+$/)) {
   console.error("PORT must be an integer between 1 and 65535.");
   process.exitCode = 1;
 } else {
-  let stage = "MongoDB connection";
+  let stage = "JWT configuration";
 
   try {
+    const authConfig = loadAuthConfig();
+    stage = "MongoDB connection";
     await connectDb(uri);
     if (stopping) {
       await closeDatabase();
     } else {
       stage = "HTTP startup";
+      const app = createApp({ authConfig });
       const server = app.listen(port);
       await once(server, "listening");
       httpServer = server;
@@ -69,8 +73,10 @@ if (!uri?.match(/^mongodb(?:\+srv)?:\/\/\S+$/)) {
     }
   } catch {
     // Driver errors can include connection details, so log the stage only.
-    console.error(`Startup failed during ${stage}.`);
+    console.error(stage === "JWT configuration"
+      ? "JWT_SECRET must be valid Base64 encoding at least 32 bytes."
+      : `Startup failed during ${stage}.`);
     process.exitCode = 1;
-    await closeDatabase();
+    if (stage !== "JWT configuration") await closeDatabase();
   }
 }

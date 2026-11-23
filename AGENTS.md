@@ -77,3 +77,29 @@ Reply in Vietnamese with:
 5. Security/data impact — any database access, index changes, fixture creation/cleanup, or secret-handling risk.
 6. Issues and next step — unresolved problems and one proposed follow-up task.
 Never state that the database, API or application works end-to-end based only on mocks or offline unit tests.
+## Git Operations — User Controlled
+
+The user exclusively controls all Git and GitHub operations.
+
+Codex MUST NOT execute Git commands.
+
+Codex MUST NOT:
+- Create, switch, rename, or delete branches.
+- Create or remove Git worktrees.
+- Run git add, commit, push, pull, fetch, merge, or rebase.
+- Run git stash, reset, restore, or clean.
+- Create, approve, or merge Pull Requests.
+- Change GitHub repository settings.
+
+Codex MAY:
+- Implement approved features.
+- Fix approved code issues.
+- Run automated tests.
+- Explain which source files were changed.
+- Suggest Git commands for the user to execute manually.
+
+After completing a coding task, Codex must stop and
+wait for the user to perform Git operations.
+
+Never perform Git operations without explicit
+instructions from the user.

@@ -32,6 +32,9 @@ export function createProjectController(service) {
       if (result === "hasTasks") {
         return res.status(409).json({ message: "Project still has tasks." });
       }
+      if (result === "unavailable") {
+        return res.status(503).json({ message: "Project deletion could not be confirmed." });
+      }
       return res.status(204).end();
     },
   };

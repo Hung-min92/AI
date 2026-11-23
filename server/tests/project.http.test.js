@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { test } from "node:test";
 import { SignJWT } from "jose";
+import mongoose from "mongoose";
 import { createApp } from "../src/app.js";
 import { loadAuthConfig } from "../src/config/auth.js";
 import { signAccessToken } from "../src/services/token.service.js";
@@ -26,7 +27,7 @@ function row(_id, owner, date = createdAt) {
   return { _id, owner, name: "Project", description: "Original", createdAt: date, updatedAt: date };
 }
 
-function fakeProjectModel({ disappearOnDelete = false, acknowledgeDelete = true } = {}) {
+function fakeProjectModel({ disappearOnDelete = false, acknowledgeDelete = true, commitErrors = [] } = {}) {
   const rows = [
     row(firstId, owner),
     row(secondId, owner),
@@ -35,12 +36,54 @@ function fakeProjectModel({ disappearOnDelete = false, acknowledgeDelete = true 
     row(newerId, owner, newerDate),
   ];
   const calls = [];
+  const transactionEvents = [];
+  const db = mongoose.createConnection();
+  let activeSession;
+  db.startSession = async () => {
+    // Real driver retry logic, with local transaction state and no database connection.
+    const client = new mongoose.mongo.MongoClient("mongodb://127.0.0.1:1");
+    const session = client.startSession();
+    activeSession = session;
+    const start = session.startTransaction.bind(session);
+    const abort = session.abortTransaction.bind(session);
+    const commit = session.commitTransaction.bind(session);
+    let snapshot;
+    session.startTransaction = (options) => {
+      assert.deepEqual(options, {
+        readPreference: "primary",
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+        maxCommitTimeMS: 5_000,
+      });
+      snapshot = rows.map(row => ({ ...row }));
+      transactionEvents.push("start");
+      start(options);
+    };
+    session.abortTransaction = async () => {
+      await abort();
+      rows.splice(0, rows.length, ...snapshot);
+      transactionEvents.push("abort");
+    };
+    session.commitTransaction = async () => {
+      transactionEvents.push("commit");
+      if (commitErrors.length) throw commitErrors.shift();
+      await commit();
+    };
+    return session;
+  };
+  const checkSession = (session) => {
+    assert.equal(session, activeSession);
+    assert.ok(session.inTransaction());
+  };
   const matches = (row, filter) => Object.entries(filter).every(([key, value]) => row[key] === value);
   const fieldQuery = (value) => ({ select: () => ({ lean: async () => value }) });
 
   return {
     rows,
     calls,
+    db,
+    transactionEvents,
+    checkSession,
     async create(fields) {
       calls.push("create");
       const project = { ...row(createdId, fields.owner), description: "", ...fields };
@@ -85,15 +128,20 @@ function fakeProjectModel({ disappearOnDelete = false, acknowledgeDelete = true 
       Object.assign(project, update.$set, { updatedAt: newerDate });
       return fieldQuery(project);
     },
-    async exists(filter) {
-      calls.push("exists");
+    async updateOne(filter, update, options) {
+      calls.push("updateOne");
       assert.equal(filter.owner, owner);
       assert.deepEqual(Object.keys(filter).sort(), ["_id", "owner"]);
+      checkSession(options.session);
+      assert.equal(options.timestamps, false);
+      assert.deepEqual(update, { $inc: { taskLinkVersion: 1 } });
       const project = rows.find((row) => matches(row, filter));
-      return project ? { _id: project._id } : null;
+      if (project) project.taskLinkVersion = (project.taskLinkVersion ?? 0) + 1;
+      return { acknowledged: true, matchedCount: project ? 1 : 0 };
     },
-    async deleteOne(filter) {
+    async deleteOne(filter, { session }) {
       calls.push("deleteOne");
+      checkSession(session);
       assert.equal(filter.owner, owner);
       assert.deepEqual(Object.keys(filter).sort(), ["_id", "owner"]);
       if (!acknowledgeDelete) return { acknowledged: false };
@@ -104,15 +152,21 @@ function fakeProjectModel({ disappearOnDelete = false, acknowledgeDelete = true 
   };
 }
 
-async function setup(t, { tasks = [], ...projectOptions } = {}) {
+async function setup(t, { tasks = [], taskErrors = [], ...projectOptions } = {}) {
   const projectModel = fakeProjectModel(projectOptions);
   const taskLookups = [];
   const taskModel = {
-    async exists(filter) {
+    exists(filter) {
       assert.deepEqual(Object.keys(filter), ["project"]);
-      taskLookups.push(filter.project);
-      const task = tasks.find(({ project }) => project === filter.project);
-      return task ? { _id: task._id } : null;
+      return {
+        async session(session) {
+          projectModel.checkSession(session);
+          taskLookups.push(filter.project);
+          if (taskErrors.length) throw taskErrors.shift();
+          const task = tasks.find(({ project }) => project === filter.project);
+          return task ? { _id: task._id } : null;
+        },
+      };
     },
   };
   const userLookups = [];
@@ -281,7 +335,8 @@ test("DELETE removes an owned empty Project and returns 204 without a body", asy
   assert.equal(response.status, 204);
   assert.equal(response.body, "");
   assert.equal(projectModel.rows.some(({ _id }) => _id === firstId), false);
-  assert.deepEqual(projectModel.calls, ["exists", "deleteOne"]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "deleteOne"]);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "commit"]);
   assert.deepEqual(taskLookups, [firstId]);
 });
 
@@ -295,7 +350,8 @@ test("DELETE returns 409 and preserves the Project and Tasks when a linked Task 
   assert.deepEqual(response.body, { message: "Project still has tasks." });
   assert.deepEqual(projectModel.rows.find(({ _id }) => _id === firstId), project);
   assert.deepEqual(tasks, [fixture]);
-  assert.deepEqual(projectModel.calls, ["exists"]);
+  assert.deepEqual(projectModel.calls, ["updateOne"]);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "abort"]);
   assert.deepEqual(taskLookups, [firstId]);
 });
 
@@ -310,7 +366,8 @@ test("DELETE treats missing and foreign Projects identically without looking up 
     assert.deepEqual(response.body, { message: "Project not found." });
   }
   assert.equal(projectModel.rows.some(({ _id }) => _id === foreignId), true);
-  assert.deepEqual(projectModel.calls, ["exists", "exists"]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "updateOne"]);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "abort", "start", "abort"]);
   assert.deepEqual(taskLookups, []);
 });
 
@@ -340,15 +397,69 @@ test("DELETE returns 404 when the Project disappears before the delete operation
   const response = await send({ method: "DELETE", path: `/${firstId}` });
   assert.equal(response.status, 404);
   assert.deepEqual(response.body, { message: "Project not found." });
-  assert.deepEqual(projectModel.calls, ["exists", "deleteOne"]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "deleteOne"]);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "abort"]);
   assert.deepEqual(taskLookups, [firstId]);
 });
 
-test("DELETE returns a generic 500 for an unacknowledged delete", async (t) => {
-  const { send } = await setup(t, { acknowledgeDelete: false });
+test("DELETE rolls back the coordination write when deletion is unacknowledged", async (t) => {
+  const { send, projectModel } = await setup(t, { acknowledgeDelete: false });
+  const before = { ...projectModel.rows.find(row => row._id === firstId) };
   const response = await send({ method: "DELETE", path: `/${firstId}` });
   assert.equal(response.status, 500);
   assert.deepEqual(response.body, { message: "Internal server error." });
+  assert.deepEqual(projectModel.transactionEvents, ["start", "abort"]);
+  assert.deepEqual(projectModel.rows.find(row => row._id === firstId), before);
+});
+
+function transactionError(label, code) {
+  const error = new mongoose.mongo.MongoServerError({ message: "Private driver detail", code });
+  error.addErrorLabel(label);
+  return error;
+}
+
+test("DELETE retries the transaction after a transient Task lookup error", async (t) => {
+  const { send, projectModel, taskLookups } = await setup(t, {
+    taskErrors: [transactionError("TransientTransactionError", 112)],
+  });
+  const response = await send({ method: "DELETE", path: `/${firstId}` });
+  assert.equal(response.status, 204);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "abort", "start", "commit"]);
+  assert.deepEqual(taskLookups, [firstId, firstId]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "updateOne", "deleteOne"]);
+});
+
+test("DELETE stops retrying after three transient transaction attempts and rolls back", async (t) => {
+  const { send, projectModel } = await setup(t, {
+    taskErrors: Array.from({ length: 4 }, () => transactionError("TransientTransactionError", 112)),
+  });
+  const before = { ...projectModel.rows.find(row => row._id === firstId) };
+  const response = await send({ method: "DELETE", path: `/${firstId}` });
+  assert.equal(response.status, 503);
+  assert.deepEqual(projectModel.calls, ["updateOne", "updateOne", "updateOne"]);
+  assert.equal(projectModel.transactionEvents.includes("commit"), false);
+  assert.deepEqual(projectModel.rows.find(row => row._id === firstId), before);
+});
+
+test("DELETE lets the driver retry an ambiguous commit without repeating the delete", async (t) => {
+  const { send, projectModel } = await setup(t, {
+    commitErrors: [transactionError("UnknownTransactionCommitResult", 91)],
+  });
+  const response = await send({ method: "DELETE", path: `/${firstId}` });
+  assert.equal(response.status, 204);
+  assert.deepEqual(projectModel.transactionEvents, ["start", "commit", "commit"]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "deleteOne"]);
+});
+
+test("DELETE returns a safe 503 when the commit remains unconfirmed", async (t) => {
+  const { send, projectModel } = await setup(t, {
+    commitErrors: [transactionError("UnknownTransactionCommitResult", 50)],
+  });
+  const response = await send({ method: "DELETE", path: `/${firstId}` });
+  assert.equal(response.status, 503);
+  assert.deepEqual(response.body, { message: "Project deletion could not be confirmed." });
+  assert.deepEqual(projectModel.transactionEvents.slice(0, 2), ["start", "commit"]);
+  assert.deepEqual(projectModel.calls, ["updateOne", "deleteOne"]);
 });
 
 test("malformed URL encoding in a Project ID returns 400 before querying Projects", async (t) => {

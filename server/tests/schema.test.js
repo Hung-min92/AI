@@ -59,6 +59,7 @@ test("Task accepts only the supported priority values", async () => {
 
 test("Project and Task apply the expected defaults", () => {
   assert.equal(new Project().description, "");
+  assert.equal(new Project().taskLinkVersion, 0);
   const task = new Task();
   assert.equal(task.description, "");
   assert.equal(task.status, "todo");

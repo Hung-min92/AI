@@ -1,4 +1,12 @@
+import {
+  ProjectTransactionUnavailableError,
+  runProjectTransaction,
+  touchOwnedProject,
+} from "./project-transaction.js";
+
 const publicFields = "name description createdAt updatedAt";
+const projectMissing = new Error("Project not found.");
+const projectHasTasks = new Error("Project still has tasks.");
 
 function publicProject(project) {
   return {
@@ -47,12 +55,22 @@ export function createProjectService(projectModel, taskModel) {
 
     async remove(owner, id) {
       const filter = { _id: id, owner };
-      if (!(await projectModel.exists(filter))) return "notFound";
-      if (await taskModel.exists({ project: id })) return "hasTasks";
+      try {
+        return await runProjectTransaction(projectModel, async (session) => {
+          if (!(await touchOwnedProject(projectModel, filter, session))) throw projectMissing;
+          if (await taskModel.exists({ project: id }).session(session)) throw projectHasTasks;
 
-      const result = await projectModel.deleteOne(filter);
-      if (!result.acknowledged) throw new Error("Project deletion was not acknowledged.");
-      return result.deletedCount === 1 ? "deleted" : "notFound";
+          const result = await projectModel.deleteOne(filter, { session });
+          if (!result.acknowledged) throw new Error("Project deletion was not acknowledged.");
+          if (result.deletedCount !== 1) throw projectMissing;
+          return "deleted";
+        });
+      } catch (error) {
+        if (error === projectMissing) return "notFound";
+        if (error === projectHasTasks) return "hasTasks";
+        if (error instanceof ProjectTransactionUnavailableError) return "unavailable";
+        throw error;
+      }
     },
   };
 }

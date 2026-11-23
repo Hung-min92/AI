@@ -4,6 +4,7 @@ import Task from "./models/Task.js";
 import User from "./models/User.js";
 import { createAuthRouter } from "./routes/auth.routes.js";
 import { createProjectRouter } from "./routes/project.routes.js";
+import { createTaskRouters } from "./routes/task.routes.js";
 
 export function createApp({ authConfig, userModel = User, projectModel = Project, taskModel = Task } = {}) {
   const app = express();
@@ -18,8 +19,11 @@ export function createApp({ authConfig, userModel = User, projectModel = Project
   });
 
   if (authConfig) {
+    const { projectTasks, tasks } = createTaskRouters({ authConfig, userModel, projectModel, taskModel });
     app.use("/api/auth", createAuthRouter(userModel, authConfig));
+    app.use("/api/projects", projectTasks);
     app.use("/api/projects", createProjectRouter({ authConfig, userModel, projectModel, taskModel }));
+    app.use("/api/tasks", tasks);
   }
 
   app.use((req, res) => {

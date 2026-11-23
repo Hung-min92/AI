@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const taskSchema = new mongoose.Schema(
   {
-    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: true },
+    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: true, immutable: true },
     title: { type: String, required: true, trim: true, maxlength: 160 },
     description: { type: String, default: "", maxlength: 5000 },
     status: {
